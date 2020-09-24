@@ -1,0 +1,310 @@
+        ctl-opt dftactgrp(*no) actgrp(*new) ALWNULL(*INPUTONLY);
+
+      //---------------------------------------------------------
+      // P R O T O T Y P E S
+      //---------------------------------------------------------
+      // *entry parms
+        dcl-pi *n;
+          inpJOBS    char(10)   const;
+        end-pi;
+
+      //---------------------------------------------------------
+      // V A R I A B L E S
+      //---------------------------------------------------------
+
+        dcl-ds jobDS PSDS qualified;
+          name   char(10)   pos(244);
+          user   char(10)   pos(254);
+          number zoned(6:0) pos(264);
+        end-ds;
+        dcl-s myJob           char(30);
+        dcl-s loop            ind     ;
+
+        dcl-s glbJobSubmitter char(30);
+        dcl-s glbJobName      char(30);
+        dcl-s glbStart        timestamp;
+
+        dcl-ds JMWORKPF ext qualified;
+        end-ds;
+        dcl-ds workDS likeds(JMWORKPF);
+
+        dcl-ds JMDEPSPF ext qualified;
+        end-ds;
+        dcl-ds depsDS likeds(JMDEPSPF);
+
+      //---------------------------------------------------------
+      // M A I N L I N E
+      //---------------------------------------------------------
+
+        // Set SQL options
+        exec sql
+          set option commit = *none, datfmt = *iso;
+
+        // Initialise variables
+        init();
+
+        loop = getJobStatus();
+
+          // Get statuses until none left
+          doW loop;
+
+            // Process dependencies for any jobs waiting to start
+            exec sql
+              declare JWC1    cursor for
+              (select * from JMWORKPF
+               where  JWJBSUBM = :glbJobSubmitter
+               and    JWJBSTAT = 'JOBQ'          );
+
+            exec sql
+              open    JWC1   ;
+
+            // Read through all jobs in work file
+            exec sql
+                fetch JWC1    into :workDS;
+            doW sqlOut = ':)';       // not eof
+              // Substring out the job name
+              glbJobName = %subst(workDS.JWJBNAME
+                                 :%scan('/':workDS.JWJBNAME:8)+1
+                                 :10);
+
+              // Check for dependencies
+              exec sql
+                  SELECT *
+                  into :depsDS
+                  FROM  JMDEPSPF
+                  WHERE JMJBKEY  = :inpJOBS
+                  AND   JMJBNAME = :glbJobName;
+
+              select;
+                // Dependency not found - release anyway
+                when sqlOut() = ':/';
+                  releaseJob(workDS.JWJBNAME);
+
+                // Check dependencies
+                when workDS.JWJBSTAT = 'JOBQ';  // Held
+                  // If dependencies met then release
+                  if  checkJobDep(depsDS.JMJBDEP1)
+                  and checkJobDep(depsDS.JMJBDEP2)
+                  and checkJobDep(depsDS.JMJBDEP3)
+                  and checkJobDep(depsDS.JMJBDEP4)
+                  and checkJobDep(depsDS.JMJBDEP5)     ;
+                     releaseJob(workDS.JWJBNAME);
+                  endIf;
+              endSl;
+
+              // Read next job
+              exec sql
+                  fetch JWC1    into :workDS;
+            endDo;
+
+            exec sql
+                close JWC1;
+
+            loop = updJobStatus();
+
+            sleep();
+
+          endDo;
+
+        return;
+        *inlr = *on;
+
+      //---------------------------------------------------------------
+      // P R O C E D U R E S
+      //---------------------------------------------------------------
+
+      //---------------------------------------------------------------
+      // SQL output
+      //---------------------------------------------------------------
+        dcl-proc init  ;
+
+          // Construct internal job - number/user/name
+          myJob   = %trim(
+                    %editw(jobDS.Number:'0      ') + '/'
+                  + %trim(          jobDS.User   ) + '/'
+                  + %trim(          jobDS.Name   )       );
+
+          // Get job submitter name
+          exec sql
+              SELECT SUBMITTER_JOB_NAME, JOB_ENTERED_SYSTEM_TIME
+              into   :glbJobSubmitter, :glbStart
+              FROM TABLE(QSYS2.JOB_INFO()) A
+              WHERE JOB_NAME = :myJob       ;
+
+        end-proc;
+
+      //---------------------------------------------------------------
+      // Get Job Statuses
+      //---------------------------------------------------------------
+        dcl-proc getJobStatus;
+          dcl-pi *n ind;
+          end-pi;
+
+          // Initialise work file
+       // exec sql
+       //   delete from JMWORKPF
+       //   where  JWJBSUBM = :glbJobSubmitter ;
+
+          // Get all jobs submitted by the same job (except for this one)
+          // and store them in the work file
+          exec sql
+              INSERT INTO JMWORKPF
+              SELECT
+              :glbJobSubmitter, JOB_NAME, JOB_STATUS,
+              TIMESTAMP('0001-01-01'), TIMESTAMP('0001-01-01')
+              FROM TABLE(QSYS2.JOB_INFO()) A
+              WHERE SUBMITTER_JOB_NAME = :glbJobSubmitter
+              AND   JOB_ENTERED_SYSTEM_TIME <=:glbStart
+              AND   JOB_ENTERED_SYSTEM_TIME >=:glbStart - 1 SECOND
+              AND   JOB_NAME <> :myJob                             ;
+
+          // If nothing found then everything has finished - exit
+          if sqlOut = ':/';
+             return *off;
+          endIf;
+
+          return *on;
+
+        end-proc;
+
+      //---------------------------------------------------------------
+      // Update Job Statuses
+      //---------------------------------------------------------------
+        dcl-proc updJobStatus;
+          dcl-pi *n ind;
+          end-pi;
+          dcl-s lclCount packed(3:0);
+
+          // Update all the jobs where the job was active
+          // but now has finished and no longer exists
+          exec sql
+              UPDATE JMWORKPF
+              SET JWJBEND = CURRENT TIMESTAMP,
+                  JWJBSTAT = 'END'
+              WHERE JWJBSUBM = :glbJobSubmitter
+              AND   JWJBSTAT = 'ACTIVE'
+              AND   NOT EXISTS
+               (SELECT 1 FROM TABLE(QSYS2.JOB_INFO()) A
+                WHERE SUBMITTER_JOB_NAME = :glbJobSubmitter
+                AND   JOB_ENTERED_SYSTEM_TIME <=:glbStart
+                AND   JOB_ENTERED_SYSTEM_TIME >=:glbStart - 1 SECOND
+                AND   JOB_NAME = JWJBNAME        )        ;
+
+          // Check if any jobs left
+          exec sql
+              SELECT COUNT(*)
+              into :lclCount
+              FROM TABLE(QSYS2.JOB_INFO()) A
+              WHERE SUBMITTER_JOB_NAME = :glbJobSubmitter
+              AND   JOB_ENTERED_SYSTEM_TIME <=:glbStart
+              AND   JOB_ENTERED_SYSTEM_TIME >=:glbStart - 1 SECOND
+              AND   JOB_NAME <> :myJob                             ;
+
+          // If nothing found then everything has finished - exit
+          if lclCount = 0;
+             return *off;
+          endIf;
+
+          return *on;
+
+        end-proc;
+
+      //---------------------------------------------------------------
+      // Check Job Dependency
+      //---------------------------------------------------------------
+        dcl-proc checkJobDep;
+          dcl-pi *n ind;
+            inJob char(10) const;
+          end-pi;
+          dcl-s lclJob char(12);
+          dcl-s lclCount packed(3:0);
+
+          // If no dependency then met
+          if inJob = *blanks;
+            return *on;
+          endIf;
+
+          // If dependency then check if the job is running (has run)
+          lclJob = '%/' + %trim(inJob) ;
+
+          exec sql
+              SELECT COUNT(*)
+              into :lclCount
+              FROM TABLE(QSYS2.JOB_INFO()) A
+              WHERE JOB_NAME like trim(:lclJob)
+              AND   JOB_ENTERED_SYSTEM_TIME <=:glbStart
+              AND   JOB_ENTERED_SYSTEM_TIME >=:glbStart - 1 SECOND
+              AND   SUBMITTER_JOB_NAME = :glbJobSubmitter;
+
+          // No job found means dependency met
+          return lclCount = 0;
+
+        end-proc;
+
+      //---------------------------------------------------------------
+      // Release job
+      //---------------------------------------------------------------
+        dcl-proc releaseJob;
+          dcl-pi *n;
+            inJob char(30) const;
+          end-pi;
+
+          dcl-s lclCmd char(50) ;
+
+          lclCmd = 'RLSJOB ' + %trim(inJob);
+
+          exec sql
+              CALL QSYS2.QCMDEXC(:lclCmd);
+
+          // Update start time
+          exec sql
+              UPDATE JMWORKPF
+              SET JWJBTIME = CURRENT TIMESTAMP, JWJBSTAT = 'ACTIVE'
+              WHERE JWJBSUBM = :glbJobSubmitter
+              AND   JWJBNAME = :inJob;
+
+          return;
+
+        end-proc;
+
+      //---------------------------------------------------------------
+      // Delay job
+      //---------------------------------------------------------------
+        dcl-proc sleep;
+
+          exec sql
+              CALL QSYS2.QCMDEXC('DLYJOB 15');
+
+          return;
+
+        end-proc;
+      //---------------------------------------------------------------
+      // SQL output
+      //---------------------------------------------------------------
+        dcl-proc sqlOut       ;
+          dcl-pi *n like(output);
+          end-pi;
+          dcl-s state  char(5);
+          dcl-s output char(2);
+          dcl-s msg    char(32);
+
+        exec sql
+          get diagnostics condition 1
+          :state      = RETURNED_SQLSTATE;
+
+          // SQL result conditions
+          select;
+            when  %subst(state:1:2) = '00';         // Success
+              output = ':)';
+            when  %subst(state:1:2) = '01';         // Warning
+              output = ':(';
+            when  %subst(state:1:2) = '02';         // No records found
+              output = ':/';
+            other;                                  // Escape
+              output = ':o';
+          endSl;
+
+          return output;
+
+        end-proc;
+

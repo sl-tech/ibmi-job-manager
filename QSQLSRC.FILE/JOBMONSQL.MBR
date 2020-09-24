@@ -1,0 +1,17 @@
+      CREATE OR REPLACE TABLE L7807674/JMDEPSPF
+            (JMJBKEY       CHAR( 10)     NOT NULL,
+             JMJBNAME      CHAR( 10)     NOT NULL,
+             JMJBDEP1      CHAR( 10)     NOT NULL,
+             JMJBDEP2      CHAR( 10)     NOT NULL,
+             JMJBDEP3      CHAR( 10)     NOT NULL,
+             JMJBDEP4      CHAR( 10)     NOT NULL,
+             JMJBDEP5      CHAR( 10)     NOT NULL,
+             PRIMARY KEY (JMJBKEY, JMJBNAME))     ;
+
+      CREATE OR REPLACE TABLE L7807674/JMWORKPF
+            (JWJBSUBM      CHAR( 30)     NOT NULL,
+             JWJBNAME      CHAR( 30)     NOT NULL,
+             JWJBSTAT      CHAR( 10)     NOT NULL,
+             JWJBTIME      TIMESTAMP     NOT NULL,
+             JWJBEND       TIMESTAMP     NOT NULL,
+             PRIMARY KEY (JWJBSUBM, JWJBNAME) );

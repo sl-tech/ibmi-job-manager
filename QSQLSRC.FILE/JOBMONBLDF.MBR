@@ -1,0 +1,7 @@
+             PGM
+             MONMSG     MSGID(CPF0000)
+             DLTF       FILE(L7807674/JMWORKPF)
+             DLTF       FILE(L7807674/JMDEPSPF)
+             RUNSQLSTM  SRCFILE(L7807674/QSQLSRC) SRCMBR(JOBMONSQL) +
+                          COMMIT(*NONE) ERRLVL(30)
+             ENDPGM
